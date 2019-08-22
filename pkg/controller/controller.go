@@ -55,7 +55,8 @@ func RegisterInformers(c *config.Config) {
 	}
 
 	// Register informers for k8s events
-	log.Logger.Infof("Registering kubernetes events informer for types: %+v", config.AllowedEventType.String())
+	log.Logger.Infof("Registering kubernetes events informer for types: %+v", config.WarningEvent.String())
+	log.Logger.Infof("Registering kubernetes events informer for types: %+v", config.NormalEvent.String())
 
 	utils.KubeInformerFactory.Core().V1().Events().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -72,9 +73,13 @@ func RegisterInformers(c *config.Config) {
 			// Kind of involved object
 			kind := strings.ToLower(eventObj.InvolvedObject.Kind)
 
-			// If event type is AllowedEventType and configured for the resource
-			if strings.ToLower(eventObj.Type) == config.AllowedEventType.String() {
-				sendEvent(obj, c, kind, config.ErrorEvent)
+			switch strings.ToLower(eventObj.Type) {
+			case config.WarningEvent.String():
+				// Send WarningEvent as ErrorEvents
+				sendEvent(obj, nil, c, kind, config.ErrorEvent)
+			case config.NormalEvent.String():
+				// Send NormalEvent as Insignificant InfoEvent
+				sendEvent(obj, nil, c, kind, config.InfoEvent)
 			}
 		},
 	})
@@ -95,32 +100,48 @@ func registerEventHandlers(c *config.Config, resourceType string, events []confi
 	for _, event := range events {
 		if event == config.AllEvent || event == config.CreateEvent {
 			handlerFns.AddFunc = func(obj interface{}) {
-				sendEvent(obj, c, resourceType, config.CreateEvent)
+				log.Logger.Debugf("Processing add to %v", resourceType)
+				sendEvent(obj, nil, c, resourceType, config.CreateEvent)
 			}
 		}
 
 		if event == config.AllEvent || event == config.UpdateEvent {
 			handlerFns.UpdateFunc = func(old, new interface{}) {
-				sendEvent(new, c, resourceType, config.UpdateEvent)
+				log.Logger.Debugf("Processing update to %v\n Object: %+v\n", resourceType, new)
+				sendEvent(new, old, c, resourceType, config.UpdateEvent)
 			}
 		}
 
 		if event == config.AllEvent || event == config.DeleteEvent {
 			handlerFns.DeleteFunc = func(obj interface{}) {
-				sendEvent(obj, c, resourceType, config.DeleteEvent)
+				log.Logger.Debugf("Processing delete to %v", resourceType)
+				sendEvent(obj, nil, c, resourceType, config.DeleteEvent)
 			}
 		}
 	}
 	return handlerFns
 }
 
-func sendEvent(obj interface{}, c *config.Config, kind string, eventType config.EventType) {
+func sendEvent(obj, oldObj interface{}, c *config.Config, kind string, eventType config.EventType) {
 	// Filter namespaces
 	objectMeta := utils.GetObjectMetaData(obj)
-	if !utils.AllowedEventKindsMap[utils.EventKind{Resource: kind, Namespace: "all", EventType: eventType}] &&
-		!utils.AllowedEventKindsMap[utils.EventKind{Resource: kind, Namespace: objectMeta.Namespace, EventType: eventType}] {
-		return
+
+	switch eventType {
+	case config.InfoEvent:
+		// Skip if ErrorEvent is not configured for the resource
+		if !utils.AllowedEventKindsMap[utils.EventKind{Resource: kind, Namespace: "all", EventType: config.ErrorEvent}] &&
+			!utils.AllowedEventKindsMap[utils.EventKind{Resource: kind, Namespace: objectMeta.Namespace, EventType: config.ErrorEvent}] {
+			log.Logger.Debugf("Ignoring %s to %s/%v in %s namespaces", eventType, kind, objectMeta.Name, objectMeta.Namespace)
+			return
+		}
+	default:
+		if !utils.AllowedEventKindsMap[utils.EventKind{Resource: kind, Namespace: "all", EventType: eventType}] &&
+			!utils.AllowedEventKindsMap[utils.EventKind{Resource: kind, Namespace: objectMeta.Namespace, EventType: eventType}] {
+			log.Logger.Debugf("Ignoring %s to %s/%v in %s namespaces", eventType, kind, objectMeta.Name, objectMeta.Namespace)
+			return
+		}
 	}
+
 	log.Logger.Debugf("Processing %s to %s/%v in %s namespaces", eventType, kind, objectMeta.Name, objectMeta.Namespace)
 
 	// Check if Notify disabled
@@ -140,17 +161,28 @@ func sendEvent(obj interface{}, c *config.Config, kind string, eventType config.
 		}
 	}
 
-	// After resync, Informer gets OnUpdate call, even if nothing changed.
-	// We need to skip update event if that is happened before current time.
-	// As a workaround, we will be ignoring update events older than 5s of current time.
-	if eventType == config.UpdateEvent && time.Now().Sub(event.TimeStamp).Seconds() > 5 {
-		log.Logger.Debug("Skipping older events")
-		return
+	// check for siginificant Update Events in objects
+	if eventType == config.UpdateEvent {
+		updateMsg := utils.Diff(oldObj, obj)
+		if len(updateMsg) > 0 {
+			event.Messages = append(event.Messages, updateMsg)
+		} else {
+			// skipping least significant update
+			log.Logger.Debug("skipping least significant Update event")
+			event.Skip = true
+		}
 	}
 
+	// Filter events
 	event = filterengine.DefaultFilterEngine.Run(obj, event)
 	if event.Skip {
 		log.Logger.Debugf("Skipping event: %#v", event)
+		return
+	}
+
+	// Skip unpromoted insignificant InfoEvents
+	if event.Type == config.InfoEvent {
+		log.Logger.Debugf("Skipping Insignificant InfoEvent: %#v", event)
 		return
 	}
 

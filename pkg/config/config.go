@@ -9,9 +9,6 @@ import (
 )
 
 const (
-	// AllowedEventType K8s event types allowed to forward
-	AllowedEventType EventType = WarningEvent
-
 	// CreateEvent when resource is created
 	CreateEvent EventType = "create"
 	// UpdateEvent when resource is updated
@@ -22,6 +19,10 @@ const (
 	ErrorEvent EventType = "error"
 	// WarningEvent for warning events
 	WarningEvent EventType = "warning"
+	// NormalEvent for Normal events
+	NormalEvent EventType = "normal"
+	// InfoEvent for insignificant Info events
+	InfoEvent EventType = "info"
 	// AllEvent to watch all events
 	AllEvent EventType = "all"
 	// ShortNotify is the Default NotifType
@@ -53,8 +54,19 @@ type Config struct {
 // Resource contains resources to watch
 type Resource struct {
 	Name       string
-	Namespaces []string
+	Namespaces Namespaces
 	Events     []EventType
+}
+
+// Namespaces contains namespaces to include and ignore
+// Include contains a list of namespaces to be watched,
+//  - "all" to watch all the namespaces
+// Ignore contains a list of namespaces to be ignored when all namespaces are included
+// It is an optional (omitempty) field which is tandem with Include [all]
+// example : include [all], ignore [x,y,z]
+type Namespaces struct {
+	Include []string
+	Ignore  []string `yaml:",omitempty"`
 }
 
 // Communications channels to send events to
